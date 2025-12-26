@@ -694,10 +694,15 @@ struct Transformers <: Records
     """
     name::Vector{InlineString15}
     """
-    The initial transformer status, where 1 designates in-service and 0 designates out-of-service.
+    The initial transformer status:
+    * 0 - out of service (for both two-winding and three-winding)
+    * 1 - in service (for both two-winding and three-winding)
+    * 2 - winding 2 out of service (only applies to three-winding)
+    * 3 - winding 3 out of service (only applies to three-winding)
+    * 4 - only winding 1 in service (only applies to three-winding)
     `stat` = 1 by default.
     """
-    stat::Vector{Bool}
+    stat::Vector{Int8}
     """
     An owner number; (1 through the maximum number of owners at the current size level).
     Each transformer may have up to four owners. See [`Owners`](@ref).
@@ -1650,38 +1655,36 @@ struct VSCDCLines <: Records
     By default, each F_i is 1.0.
     """
     f1::Vector{Float64}
-    # TODO: are o2, f2, o3, f3, o4, f4 always present?
     """
-    An owner number; (1 through the maximum number of owners at the current size level).
-    See [`Owners`](@ref).
-    By default, `o2` is zero.
+    Optional. An owner number (1 through the maximum number of owners at the current size level).
+    See [`Owners`](@ref). `o2` = 0 by default.
     """
-    o2::Vector{OwnerNum}
+    o2::Vector{Union{OwnerNum,Missing}}
     """
-    The fraction of total ownership assigned to owner `o2`; must be positive.
-    By default, `f2` is 1.0.
+    Optional. The fraction of total ownership assigned to owner `o2`; must be positive.
+    `f2` = 1.0 by default.
     """
-    f2::Vector{Float64}
+    f2::Vector{Union{Float64,Missing}}
     """
-    An owner number; (1 through the maximum number of owners at the current size level).
-    By default, `o3` is zero.
+    Optional. An owner number (1 through the maximum number of owners at the current size level).
+    `o3` = 0 by default.
     """
-    o3::Vector{OwnerNum}
+    o3::Vector{Union{OwnerNum,Missing}}
     """
-    The fraction of total ownership assigned to owner `o2`; must be positive.
-    By default, `f3` is 1.0.
+    Optional. The fraction of total ownership assigned to owner `o3`; must be positive.
+    `f3` = 1.0 by default.
     """
-    f3::Vector{Float64}
+    f3::Vector{Union{Float64,Missing}}
     """
-    An owner number; (1 through the maximum number of owners at the current size level).
-    By default, `o4` is zero.
+    Optional. An owner number (1 through the maximum number of owners at the current size level).
+    `o4` = 0 by default.
     """
-    o4::Vector{OwnerNum}
+    o4::Vector{Union{OwnerNum,Missing}}
     """
-    The fraction of total ownership assigned to owner `o2`; must be positive.
-    By default, `f4` is 1.0.
+    Optional. The fraction of total ownership assigned to owner `o4`; must be positive.
+    `f4` = 1.0 by default.
     """
-    f4::Vector{Float64}
+    f4::Vector{Union{Float64,Missing}}
     # Second line: data for Converter 1
     "Converter 1 bus number, or extended bus name enclosed in single quotes. No default."
     ibus1::Vector{BusNum}

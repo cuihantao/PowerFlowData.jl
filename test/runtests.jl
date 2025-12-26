@@ -509,6 +509,79 @@ using Test
         @test length(qz.zones) == 2
     end
 
+    @testset "trailing comma in SwitchedShunts" begin
+        # Test that SwitchedShunts with trailing comma (missing n1,b1) defaults to zero
+        net = parse_network("testfiles/trailing_comma_shunts.raw")
+        switched_shunts = net.switched_shunts
+        @test length(switched_shunts) == 1
+        @test switched_shunts.i == [1]
+        # n1, b1 should default to zero when missing (trailing comma case)
+        @test switched_shunts.n1 == [0]
+        @test switched_shunts.b1 == [0.0]
+        @test switched_shunts.n8 == [0]
+        @test switched_shunts.b8 == [0.0]
+    end
+
+    @testset "warning suppression for optional fields" begin
+        # Test that parsing files with empty optional fields (Union{T, Missing})
+        # does not produce warnings
+        @test_logs parse_network("testfiles/synthetic_data_v33.RAW")
+        @test_logs parse_network("testfiles/synthetic_data_v30.raw")
+        @test_logs parse_network("testfiles/synthetic_data_v29.raw")
+
+        # Verify optional fields are properly typed and contain expected values
+        net = parse_network("testfiles/synthetic_data_v30.raw")
+
+        # Transformers have optional o2-f4 fields (Union type with Missing)
+        @test Missing <: eltype(net.transformers.o2)
+        @test Missing <: eltype(net.transformers.f2)
+
+        # Generators have optional owner fields
+        @test Missing <: eltype(net.generators.o2)
+
+        # MultiSectionLineGroups has optional dum2...dum9 fields
+        if length(net.multi_section_lines) > 0
+            @test Missing <: eltype(net.multi_section_lines.dum9)
+        end
+    end
+
+    @testset "transformer stat field values" begin
+        # Transformer stat can be 0-4 for three-winding transformers:
+        # 0 = out of service, 1 = in service, 2 = winding 2 out,
+        # 3 = winding 3 out, 4 = only winding 1 in service
+        net = parse_network("testfiles/synthetic_data_v30.raw")
+        transformers = net.transformers
+
+        # Verify stat field is Int8 (not Bool)
+        @test eltype(transformers.stat) == Int8
+
+        # Verify all stat values are in valid range
+        @test all(s -> 0 <= s <= 4, transformers.stat)
+
+        # Test that stat=1 (in service) parses correctly
+        @test any(s -> s == 1, transformers.stat)
+    end
+
+    @testset "VSCDCLines optional owner fields" begin
+        # VSCDCLines o2-f4 fields are optional (Union{T, Missing})
+        net = parse_network("testfiles/synthetic_data_v30.raw")
+        vsc = net.vsc_dc
+
+        if length(vsc) > 0
+            # Verify field types are Union with Missing
+            @test Missing <: eltype(vsc.o2)
+            @test Missing <: eltype(vsc.f2)
+            @test Missing <: eltype(vsc.o3)
+            @test Missing <: eltype(vsc.f3)
+            @test Missing <: eltype(vsc.o4)
+            @test Missing <: eltype(vsc.f4)
+
+            # Required fields should always be present
+            @test !any(ismissing, vsc.o1)
+            @test !any(ismissing, vsc.f1)
+        end
+    end
+
     @testset "`Tables.namedtupleiterator(::Records)`" begin
         # https://github.com/nickrobinson251/PowerFlowData.jl/issues/76
         net = parse_network("testfiles/synthetic_data_v30.raw")

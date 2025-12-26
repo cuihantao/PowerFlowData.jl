@@ -214,7 +214,26 @@ function next_line(bytes, pos, len, options)
     return pos
 end
 
-function parse_value(::Type{T}, bytes, pos, len, options) where {T}
+###
+### Field Parsing Strategy
+###
+# PowerFlowData uses compile-time dispatch to handle optional vs required fields:
+#
+# - Required fields: Type is T (e.g., Int8, Float64)
+#   -> Uses parse_value_warn! -> logs warnings for invalid codes
+#
+# - Optional fields: Type is Union{T, Missing} (e.g., Union{Int8, Missing})
+#   -> Uses parse_value_nowarn! -> silently accepts missing/invalid values
+#
+# The dispatch decision happens at compile time in @generated functions,
+# ensuring zero runtime overhead while maintaining type safety.
+#
+# This design prevents spurious warnings when parsing PSS/E files where certain
+# fields (like VSCDCLines o2-f4, Transformer o2-f4) may legitimately be absent.
+###
+
+# Parse a value with warning on invalid codes (for required fields)
+@inline function parse_value(::Type{T}, bytes, pos, len, options) where {T}
     res = xparse(T, bytes, pos, len, options)
     code = res.code
     if invalid(code)
@@ -226,19 +245,54 @@ function parse_value(::Type{T}, bytes, pos, len, options) where {T}
     return res.val, pos, res.code
 end
 
-function parse_value!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
-    val, pos, code = parse_value(nonmissingtype(T), bytes, pos, len, options)
+# Parse a value without warning (for optional fields with Union{T, Missing})
+@inline function parse_value_nowarn(::Type{T}, bytes, pos, len, options) where {T}
+    res = xparse(T, bytes, pos, len, options)
+    pos += res.tlen
+    return res.val, pos, res.code
+end
+
+# Parse and push for required fields (warn on invalid)
+@inline function parse_value_warn!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
+    val, pos, code = parse_value(T, bytes, pos, len, options)
     push!(getfield(rec, col)::Vector{T}, val)
     return rec, pos, code
+end
+
+# Parse and push for optional fields (no warning)
+@inline function parse_value_nowarn!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
+    val, pos, code = parse_value_nowarn(nonmissingtype(T), bytes, pos, len, options)
+    push!(getfield(rec, col)::Vector{T}, val)
+    return rec, pos, code
+end
+
+# Dispatch at compile time based on whether Missing is part of the Union type
+@inline function parse_value!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
+    return _parse_value_dispatch(rec, col, T, Val(Missing <: T), bytes, pos, len, options)
+end
+
+@inline function _parse_value_dispatch(rec, col, ::Type{T}, ::Val{true}, bytes, pos, len, options) where {T}
+    return parse_value_nowarn!(rec, col, T, bytes, pos, len, options)
+end
+
+@inline function _parse_value_dispatch(rec, col, ::Type{T}, ::Val{false}, bytes, pos, len, options) where {T}
+    return parse_value_warn!(rec, col, T, bytes, pos, len, options)
 end
 
 @generated function parse_row!(rec::R, bytes, pos, len, options) where {R <: Records}
     block = Expr(:block)
     for col in 1:fieldcount(R)
         T = eltype(fieldtype(R, col))
-        push!(block.args, quote
-            rec, pos, code = parse_value!(rec, $col, $T, bytes, pos, len, options)
-        end)
+        # Dispatch at compile time: optional fields (Union{T,Missing}) don't warn
+        if Missing <: T
+            push!(block.args, quote
+                rec, pos, code = parse_value_nowarn!(rec, $col, $T, bytes, pos, len, options)
+            end)
+        else
+            push!(block.args, quote
+                rec, pos, code = parse_value_warn!(rec, $col, $T, bytes, pos, len, options)
+            end)
+        end
     end
     # @show block
     return block
@@ -293,13 +347,22 @@ end
 function _parse_maybezero(R, col1, col2)
     T1 = eltype(fieldtype(R, col1))
     T2 = eltype(fieldtype(R, col2))
+    T1_inner = nonmissingtype(T1)
+    T2_inner = nonmissingtype(T2)
     return quote
         if newline(code)
-            push!(getfield(rec, $col1), zero($T1))
-            push!(getfield(rec, $col2), zero($T2))
+            push!(getfield(rec, $col1), zero($T1_inner))
+            push!(getfield(rec, $col2), zero($T2_inner))
         else
-            (rec, pos, code) = parse_value!(rec, $col1, $T1, bytes, pos, len, options)
-            (rec, pos, code) = parse_value!(rec, $col2, $T2, bytes, pos, len, options)
+            # Try parsing first value; if it hits newline (e.g., trailing comma case), use zeros
+            (val1, pos, code) = parse_value_nowarn($T1_inner, bytes, pos, len, options)
+            if newline(code) || invalid(code)
+                push!(getfield(rec, $col1), zero($T1_inner))
+                push!(getfield(rec, $col2), zero($T2_inner))
+            else
+                push!(getfield(rec, $col1), val1)
+                (rec, pos, code) = parse_value!(rec, $col2, $T2, bytes, pos, len, options)
+            end
         end
     end
 end
@@ -357,11 +420,11 @@ end
 ###
 
 const N_SPECIAL = IdDict(
-    # SwitchedShunts can have anywhere between 1 - 8 `N` and `B` values in the data itself,
-    # if n2, b2, ..., n8, b8 are not present, we set them to zero.
-    # i.e. the last 14 = 7(n) + 7(b) columns reqire special handling.
-    SwitchedShunts30 => 14,
-    SwitchedShunts33 => 14,
+    # SwitchedShunts can have anywhere between 0 - 8 `N` and `B` values in the data itself,
+    # if n1, b1, ..., n8, b8 are not present, we set them to zero.
+    # i.e. the last 16 = 8(n) + 8(b) columns require special handling.
+    SwitchedShunts30 => 16,
+    SwitchedShunts33 => 16,
     # ImpedanceCorrections can have anywhere between 2 - 11 `T` and `F` values in the data itself,
     # if t3, f3, ..., t11, f11 are not present, we set them to zero.
     # i.e. the last 18 = 9(t) + 9(f) columns reqire special handling.
@@ -409,6 +472,29 @@ end
     end
     push!(block.args, :(return rec, pos))
     # @show block
+    return block
+end
+
+###
+### VSCDCLines
+###
+
+# VSCDCLines has optional owner fields o2, f2, o3, f3, o4, f4 in positions 6-11,
+# with required fields before and after. The data spans 3 lines:
+# Line 1: name, mdc, rdc, o1, f1 [, o2, f2, o3, f3, o4, f4]
+# Line 2: converter 1 data (15 fields)
+# Line 3: converter 2 data (15 fields)
+@generated function parse_row!(rec::R, bytes, pos, len, options) where {R <: VSCDCLines}
+    block = Expr(:block)
+    # Parse required first line fields: name, mdc, rdc, o1, f1 (positions 1-5)
+    append!(block.args, _parse_values(R, 1, 5))
+    # Parse optional owner fields: o2, f2, o3, f3, o4, f4 (positions 6-11)
+    for col in 6:11
+        push!(block.args, _parse_maybemissing(R, col))
+    end
+    # Parse required converter 1 and converter 2 fields (positions 12-41)
+    append!(block.args, _parse_values(R, 12, fieldcount(R)))
+    push!(block.args, :(return rec, pos))
     return block
 end
 
