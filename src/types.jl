@@ -570,7 +570,8 @@ for v in (30, 33)
         """
         Owner number; 1 through the maximum number of owners at the current size level.
         Each branch may have up to four owners. See [`Owners`](@ref).
-        By default, `o1` is the owner to which bus `i` is assigned and `o2`, `o3`, and `o4` are zero.
+        By default, `o1` is the owner to which bus `i` is assigned; `o2`, `o3`, `o4` and
+        their fractions are `missing` when not given in the data.
         """
         o1::Vector{OwnerNum}
         """
@@ -1653,35 +1654,34 @@ struct VSCDCLines <: Records
     """
     An owner number; (1 through the maximum number of owners at the current size level).
     See [`Owners`](@ref).
-    By default, `o2` is zero.
-    `o2`, `f2`, `o3`, `f3`, `o4` and `f4` may be absent from the data, in which case they are zero.
+    `missing` when not given in the data (PSS/E default: 0).
     """
-    o2::Vector{OwnerNum}
+    o2::Vector{Union{OwnerNum,Missing}}
     """
     The fraction of total ownership assigned to owner `o2`; must be positive.
-    By default, `f2` is 1.0.
+    `missing` when not given in the data (PSS/E default: 1.0).
     """
-    f2::Vector{Float64}
+    f2::Vector{Union{Float64,Missing}}
     """
     An owner number; (1 through the maximum number of owners at the current size level).
-    By default, `o3` is zero.
+    `missing` when not given in the data (PSS/E default: 0).
     """
-    o3::Vector{OwnerNum}
+    o3::Vector{Union{OwnerNum,Missing}}
     """
     The fraction of total ownership assigned to owner `o3`; must be positive.
-    By default, `f3` is 1.0.
+    `missing` when not given in the data (PSS/E default: 1.0).
     """
-    f3::Vector{Float64}
+    f3::Vector{Union{Float64,Missing}}
     """
     An owner number; (1 through the maximum number of owners at the current size level).
-    By default, `o4` is zero.
+    `missing` when not given in the data (PSS/E default: 0).
     """
-    o4::Vector{OwnerNum}
+    o4::Vector{Union{OwnerNum,Missing}}
     """
     The fraction of total ownership assigned to owner `o4`; must be positive.
-    By default, `f4` is 1.0.
+    `missing` when not given in the data (PSS/E default: 1.0).
     """
-    f4::Vector{Float64}
+    f4::Vector{Union{Float64,Missing}}
     # Second line: data for Converter 1
     "Converter 1 bus number, or extended bus name enclosed in single quotes. No default."
     ibus1::Vector{BusNum}
