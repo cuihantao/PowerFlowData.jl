@@ -215,84 +215,56 @@ function next_line(bytes, pos, len, options)
 end
 
 ###
-### Field Parsing Strategy
-###
-# PowerFlowData uses compile-time dispatch to handle optional vs required fields:
-#
-# - Required fields: Type is T (e.g., Int8, Float64)
-#   -> Uses parse_value_warn! -> logs warnings for invalid codes
-#
-# - Optional fields: Type is Union{T, Missing} (e.g., Union{Int8, Missing})
-#   -> Uses parse_value_nowarn! -> silently accepts missing/invalid values
-#
-# The dispatch decision happens at compile time in @generated functions,
-# ensuring zero runtime overhead while maintaining type safety.
-#
-# This design prevents spurious warnings when parsing PSS/E files where certain
-# fields (like VSCDCLines o2-f4, Transformer o2-f4) may legitimately be absent.
+### fields
 ###
 
-# Parse a value with warning on invalid codes (for required fields)
-@inline function parse_value(::Type{T}, bytes, pos, len, options) where {T}
+# A field is blank when it is empty (`,,`) or holds only whitespace (`,   ,`), possibly
+# followed by an end-of-line comment. Parsers reports an empty field as a `sentinel`
+# and a whitespace-only one as `invalid`, so the consumed bytes are checked for the latter.
+@inline function _isblank(bytes, pos, tlen, code)
+    sentinel(code) && return true
+    invalid(code) || return false
+    for i in pos:(pos + tlen - 1)
+        b = peekbyte(bytes, i)
+        b == UInt8(' ') || b == UInt8('\t') || return (
+            b == UInt8(',') || b == UInt8('\r') || b == UInt8('\n') || b == UInt8('/')
+        )
+    end
+    return true
+end
+
+# Parse the field at `pos` as a `T`, returning `(val, pos, code, blank)`.
+# Warns when the field is neither blank nor a valid `T`; a valid value followed by an
+# end-of-line comment is not reported.
+@inline function parse_field(::Type{T}, bytes, pos, len, options) where {T}
     res = xparse(T, bytes, pos, len, options)
     code = res.code
-    if invalid(code)
-        if !(newline(code) && invaliddelimiter(code))  # not due to end-of-line comments
-            @warn codes(res.code) pos
-        end
+    blank = _isblank(bytes, pos, res.tlen, code)
+    if invalid(code) && !blank && !(newline(code) && invaliddelimiter(code))
+        @warn codes(code) pos
     end
-    pos += res.tlen
-    return res.val, pos, res.code
+    return res.val, pos + res.tlen, code, blank
 end
 
-# Parse a value without warning (for optional fields with Union{T, Missing})
-@inline function parse_value_nowarn(::Type{T}, bytes, pos, len, options) where {T}
-    res = xparse(T, bytes, pos, len, options)
-    pos += res.tlen
-    return res.val, pos, res.code
-end
-
-# Parse and push for required fields (warn on invalid)
-@inline function parse_value_warn!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
-    val, pos, code = parse_value(T, bytes, pos, len, options)
-    push!(getfield(rec, col)::Vector{T}, val)
-    return rec, pos, code
-end
-
-# Parse and push for optional fields (no warning)
-@inline function parse_value_nowarn!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
-    val, pos, code = parse_value_nowarn(nonmissingtype(T), bytes, pos, len, options)
-    push!(getfield(rec, col)::Vector{T}, val)
-    return rec, pos, code
-end
-
-# Dispatch at compile time based on whether Missing is part of the Union type
+# Parse the field at `pos` into column `col` of `rec`. A blank optional field
+# (`Union{T,Missing}`) is stored as `missing`; a blank required field is reported.
 @inline function parse_value!(rec, col::Int, ::Type{T}, bytes, pos, len, options) where {T}
-    return _parse_value_dispatch(rec, col, T, Val(Missing <: T), bytes, pos, len, options)
-end
-
-@inline function _parse_value_dispatch(rec, col, ::Type{T}, ::Val{true}, bytes, pos, len, options) where {T}
-    return parse_value_nowarn!(rec, col, T, bytes, pos, len, options)
-end
-
-@inline function _parse_value_dispatch(rec, col, ::Type{T}, ::Val{false}, bytes, pos, len, options) where {T}
-    return parse_value_warn!(rec, col, T, bytes, pos, len, options)
+    startpos = pos
+    val, pos, code, blank = parse_field(nonmissingtype(T), bytes, pos, len, options)
+    if blank && !(Missing <: T)
+        @warn "blank value for required field `$(fieldname(typeof(rec), col))`" pos=startpos
+    end
+    push!(getfield(rec, col)::Vector{T}, (Missing <: T && blank) ? missing : val)
+    return rec, pos, code
 end
 
 @generated function parse_row!(rec::R, bytes, pos, len, options) where {R <: Records}
     block = Expr(:block)
     for col in 1:fieldcount(R)
         T = eltype(fieldtype(R, col))
-        # Dispatch at compile time: optional fields (Union{T,Missing}) don't warn
-        if Missing <: T
-            push!(block.args, quote
-                rec, pos, code = parse_value_nowarn!(rec, $col, $T, bytes, pos, len, options)
-            end)
-        else
-            push!(block.args, quote
-                rec, pos, code = parse_value_warn!(rec, $col, $T, bytes, pos, len, options)
-            end)
-        end
+        push!(block.args, quote
+            rec, pos, code = parse_value!(rec, $col, $T, bytes, pos, len, options)
+        end)
     end
     # @show block
     return block
@@ -344,24 +316,24 @@ function _parse_maybemissing(R, col1, col2)
     end
 end
 
+# Columns `col1` and `col2` default to zero: when the record has already ended, when the
+# record ends with a trailing delimiter before them, or when a field is blank.
 function _parse_maybezero(R, col1, col2)
     T1 = eltype(fieldtype(R, col1))
     T2 = eltype(fieldtype(R, col2))
-    T1_inner = nonmissingtype(T1)
-    T2_inner = nonmissingtype(T2)
     return quote
         if newline(code)
-            push!(getfield(rec, $col1), zero($T1_inner))
-            push!(getfield(rec, $col2), zero($T2_inner))
+            push!(getfield(rec, $col1), zero($T1))
+            push!(getfield(rec, $col2), zero($T2))
         else
-            # Try parsing first value; if it hits newline (e.g., trailing comma case), use zeros
-            (val1, pos, code) = parse_value_nowarn($T1_inner, bytes, pos, len, options)
-            if newline(code) || invalid(code)
-                push!(getfield(rec, $col1), zero($T1_inner))
-                push!(getfield(rec, $col2), zero($T2_inner))
+            (val1, pos, code, blank1) = parse_field($T1, bytes, pos, len, options)
+            if blank1 && newline(code)
+                push!(getfield(rec, $col1), zero($T1))
+                push!(getfield(rec, $col2), zero($T2))
             else
-                push!(getfield(rec, $col1), val1)
-                (rec, pos, code) = parse_value!(rec, $col2, $T2, bytes, pos, len, options)
+                push!(getfield(rec, $col1), blank1 ? zero($T1) : val1)
+                (val2, pos, code, blank2) = parse_field($T2, bytes, pos, len, options)
+                push!(getfield(rec, $col2), blank2 ? zero($T2) : val2)
             end
         end
     end
@@ -416,7 +388,7 @@ end
 end
 
 ###
-### SwitchedShunts, ImpedanceCorrections
+### SwitchedShunts, ImpedanceCorrections, Loads, Generators, Branches, MultiSectionLineGroups
 ###
 
 const N_SPECIAL = IdDict(
@@ -427,7 +399,7 @@ const N_SPECIAL = IdDict(
     SwitchedShunts33 => 16,
     # ImpedanceCorrections can have anywhere between 2 - 11 `T` and `F` values in the data itself,
     # if t3, f3, ..., t11, f11 are not present, we set them to zero.
-    # i.e. the last 18 = 9(t) + 9(f) columns reqire special handling.
+    # i.e. the last 18 = 9(t) + 9(f) columns require special handling.
     ImpedanceCorrections => 18,
     # MultiSectionLineGroups can have between 1 - 9 `DUM_i` columns
     MultiSectionLineGroups30 => 8,
@@ -441,7 +413,8 @@ const N_SPECIAL = IdDict(
     Branches33 => 6, # 3*2
 )
 
-@generated function parse_row!(rec::R, bytes, pos, len, options) where {R <: Union{SwitchedShunts, ImpedanceCorrections, Branches}}
+# The last `N_SPECIAL[R]` columns of these records default to zero when absent.
+@generated function parse_row!(rec::R, bytes, pos, len, options) where {R <: Union{SwitchedShunts, ImpedanceCorrections}}
     block = Expr(:block)
     N = fieldcount(R) - N_SPECIAL[R]
     append!(block.args, _parse_values(R, 1, N))
@@ -457,13 +430,10 @@ const N_SPECIAL = IdDict(
     return block
 end
 
-###
-### Loads, Generators, MultiSectionLineGroups
-###
-
+# The last `N_SPECIAL[R]` columns of these records are optional and `missing` when absent.
 @generated function parse_row!(
     rec::R, bytes, pos, len, options
-) where {R <: Union{Loads,Generators,MultiSectionLineGroups}}
+) where {R <: Union{Loads,Generators,Branches,MultiSectionLineGroups}}
     block = Expr(:block)
     N = fieldcount(R) - N_SPECIAL[R]
     append!(block.args, _parse_values(R, 1, N))
