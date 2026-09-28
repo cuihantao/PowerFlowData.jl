@@ -570,12 +570,13 @@ for v in (30, 33)
         """
         Owner number; 1 through the maximum number of owners at the current size level.
         Each branch may have up to four owners. See [`Owners`](@ref).
-        By default, `o1` is the owner to which bus `i` is assigned and `o2`, `o3`, and `o4` are zero.
+        By default, `o1` is the owner to which bus `i` is assigned; `o2`, `o3`, `o4` and
+        their fractions are `missing` when not given in the data.
         """
         o1::Vector{OwnerNum}
         """
         Fraction of total ownership assigned to owner ``O_i``; each ``F_i`` must be positive.
-        The ``fi` values are normalized such that they sum to 1.0 before they are placed in the working case.
+        The `fi` values are normalized such that they sum to 1.0 before they are placed in the working case.
         By default, each `fi` is 1.0.
         """
         f1::Vector{Float64}

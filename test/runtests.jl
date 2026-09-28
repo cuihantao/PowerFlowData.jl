@@ -527,6 +527,82 @@ using Test
         end
     end
 
+    @testset "optional fields" begin
+        # Files whose optional fields are absent parse without warnings
+        @test_logs parse_network("testfiles/synthetic_data_v33.RAW")
+        @test_logs parse_network("testfiles/synthetic_data_v30.raw")
+        @test_logs parse_network("testfiles/synthetic_data_v29.raw")
+
+        net = parse_network("testfiles/synthetic_data_v30.raw")
+        @test Missing <: eltype(net.transformers.o2)
+        @test Missing <: eltype(net.transformers.f2)
+        @test Missing <: eltype(net.generators.o2)
+        @test Missing <: eltype(net.branches.o2)
+        if length(net.multi_section_lines) > 0
+            @test Missing <: eltype(net.multi_section_lines.dum9)
+        end
+    end
+
+    @testset "blank fields" begin
+        # v33 records: a generator whose optional owner fields are blank, either padded
+        # with whitespace or empty, and a branch that ends after its first owner.
+        function raw33(; gen1_o2="    ", gen2_pg="   25.725")
+            return IOBuffer("""
+            0,   100.00, 33, 0, 0, 60.00     / blank fields
+            BLANK FIELDS
+            TEST
+                1,'BUS1        ', 138.0000,1,   1,   1,   1,1.00000, 0.0, 1.10000, 0.90000, 1.10000, 0.90000
+                2,'BUS2        ', 138.0000,1,   1,   1,   1,1.00000, 0.0, 1.10000, 0.90000, 1.10000, 0.90000
+            0 / END OF BUS DATA, BEGIN LOAD DATA
+            0 / END OF LOAD DATA, BEGIN FIXED SHUNT DATA
+            0 / END OF FIXED SHUNT DATA, BEGIN GENERATOR DATA
+               1,'1 ',   158.250,     7.537,    44.940,   -30.380,1.01000,     0,   253.200, 0.00000E+0, 1.00000E+0, 0.00000E+0, 0.00000E+0,1.00000,1,  100.0,   211.000,    63.300,   1,1.0000,$(gen1_o2),      ,    ,      ,    ,      ,1, 1.0000
+               2,'1 ',$(gen2_pg),     2.034,     7.310,    -4.940,1.00000,     0,    41.160, 0.00000E+0, 1.00000E+0, 0.00000E+0, 0.00000E+0,1.00000,1,  100.0,    34.300,    10.290,   1,1.0000,,,,,,,1, 1.0000
+            0 / END OF GENERATOR DATA, BEGIN BRANCH DATA
+               1,     2,'1 ', 2.12700E-2, 5.10900E-2,   0.00693,   98.00,    0.00,    0.00,  0.00000,  0.00000,  0.00000,  0.00000,1,1,   0.00,   1,1.0000
+            0 / END OF BRANCH DATA, BEGIN TRANSFORMER DATA
+            0 / END OF TRANSFORMER DATA, BEGIN AREA DATA
+            0 / END OF AREA DATA, BEGIN TWO-TERMINAL DC DATA
+            0 / END OF TWO-TERMINAL DC DATA, BEGIN VOLTAGE SOURCE CONVERTER DATA
+            0 / END OF VOLTAGE SOURCE CONVERTER DATA, BEGIN IMPEDANCE CORRECTION DATA
+            0 / END OF IMPEDANCE CORRECTION DATA, BEGIN MULTI-TERMINAL DC DATA
+            0 / END OF MULTI-TERMINAL DC DATA, BEGIN MULTI-SECTION LINE DATA
+            0 / END OF MULTI-SECTION LINE DATA, BEGIN ZONE DATA
+            0 / END OF ZONE DATA, BEGIN INTER-AREA TRANSFER DATA
+            0 / END OF INTER-AREA TRANSFER DATA, BEGIN OWNER DATA
+            0 / END OF OWNER DATA, BEGIN FACTS CONTROL DEVICE DATA
+            0 / END OF FACTS CONTROL DEVICE DATA, BEGIN SWITCHED SHUNT DATA
+            0 /END OF SWITCHED SHUNT DATA, BEGIN GNE DEVICE DATA
+            0 /END OF GNE DEVICE DATA
+            Q
+            """)
+        end
+
+        # Blank optional fields are `missing`, not a placeholder value, and do not warn
+        net = @test_logs parse_network(raw33())
+        gens = net.generators
+        @test gens.i == [1, 2]
+        @test gens.o1 == [1, 1]
+        @test gens.f1 == [1.0, 1.0]
+        for col in (:o2, :f2, :o3, :f3, :o4, :f4)
+            @test all(ismissing, getproperty(gens, col))
+        end
+        @test gens.wmod == [1, 1]
+        @test gens.wpf == [1.0, 1.0]
+        branches = net.branches
+        @test branches.o1 == [1]
+        @test branches.f1 == [1.0]
+        for col in (:o2, :f2, :o3, :f3, :o4, :f4)
+            @test all(ismissing, getproperty(branches, col))
+        end
+
+        # An optional field holding text that is not a valid value is reported
+        @test_logs (:warn,) match_mode=:any parse_network(raw33(; gen1_o2="  abc"))
+
+        # A blank required field is reported
+        @test_logs (:warn, r"blank value for required field `pg`") match_mode=:any parse_network(raw33(; gen2_pg="         "))
+    end
+
     @testset "`Tables.namedtupleiterator(::Records)`" begin
         # https://github.com/nickrobinson251/PowerFlowData.jl/issues/76
         net = parse_network("testfiles/synthetic_data_v30.raw")
